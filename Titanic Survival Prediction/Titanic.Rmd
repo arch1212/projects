@@ -1,0 +1,542 @@
+---
+title: "Titanic Survival Prediction"
+output:
+  html_document:
+    df_print: paged
+---
+Loading essential libraries
+```{r}
+libs <- c('ggplot2', 'dplyr', 'randomForest', 'rpart', 'rpart.plot', 'car', 'e1071', 'caret')
+#install.lib <- libs[!libs %in% installed.packages()]
+#install.packages(install.lib)
+sapply(libs, require, character = T)
+```
+
+### Reading in the data
+```{r}
+train.tt <- read.csv("train.csv", stringsAsFactors = F)
+test.tt <- read.csv("test.csv", stringsAsFactors = F)
+
+# adding the y column
+test.tt$Survived <- NA
+```
+
+### Combining the test and training data
+```{r}
+full.tt <- rbind(train.tt, test.tt)
+```
+
+Checking the structure
+```{r}
+str(full.tt)
+```
+
+### Missing Value Imputation
+
+Number of missing values
+```{r}
+apply(full.tt, 2, function(x){sum(is.na(x))})
+```
+
+Empty data points
+```{r}
+apply(full.tt, 2, function(x){sum(x == '')})
+```
+
+* Age has 263 missing values
+* Cabin has 1014 missing values
+* Embarked has just 2 missing values
+* Fare has one missing value
+
+#### Embarked
+Replacing embarked with most frequent observations
+
+```{r}
+table(full.tt$Embarked)
+```
+
+Replacing the empty observations
+```{r}
+full.tt$Embarked[full.tt$Embarked == ''] <- "S"
+table(full.tt$Embarked)
+```
+
+### Conversion to Factors
+
+Checking to see how many variables can be moved to factors
+```{r}
+apply(full.tt, 2, function(x){length(unique(x))})
+```
+
+Survived, Sex, Pclass, and Embarked can be converted to factor
+```{r}
+cols <- c("Survived", "Sex", "Pclass", "Embarked")
+for(i in cols){
+  full.tt[,i] <- as.factor(full.tt[,i])
+}
+```
+
+### Exploratory data Analysis and Feature Engineering
+
+#### rich vs poor
+ Plotting Pclass and Survived
+```{r}
+ggplot(full.tt[1:891,], aes(x = Pclass, fill = factor(Survived))) +
+geom_bar() +
+ggtitle("Pclass v/s Survival Rate")+
+xlab("Pclass") +
+ylab("Total Count") +
+labs(fill = "Survived")
+```
+ First class has better survival rate than others
+ 
+ ### Rich and poor Survival rate vs. Sex
+```{r}
+ggplot(full.tt[1:891,], aes(x = Sex, fill = Survived)) +
+geom_bar() +
+facet_wrap(~Pclass) + 
+ggtitle("3D view of sex, pclass, and survival") +
+xlab("Sex") +
+ylab("Total Count") +
+labs(fill = "Survived")
+```
+In all the classes, female survivors are more than the male survivors
+ 
+### Title
+```{r}
+head(full.tt$Name)
+```
+ 
+Extracting title from the names
+```{r}
+names <- full.tt$Name
+title <- gsub("^.*, (.*?)\\..*$", "\\1", names)
+full.tt$title <- title
+
+table(title)
+```
+* Master, Miss, Mr and Mrs are taking more numbers than anything
+* Grouping Others into these bigger categories while checking survival rate and genders
+* Also, Creating a feature with too many levels may lead to overfitting, therefore we will combine certain levels while trying to retain reasonable amount of information
+
+Exploring Dona, Lady, Mlle, Mme, Ms
+```{r}
+table(full.tt$Sex[full.tt$title %in% c("Dona", "Lady", "Mlle", "Mme", "Ms")])
+```
+
+Combining levels
+```{r}
+full.tt$title[full.tt$title == 'Mlle'] <- 'Miss'
+full.tt$title[full.tt$title == 'Ms'] <- 'Miss'
+full.tt$title[full.tt$title == 'Mme'] <- 'Mrs'
+full.tt$title[full.tt$title == 'Lady'] <- 'Miss'
+full.tt$title[full.tt$title == 'Dona'] <- 'Miss'
+
+```
+
+```{r}
+full.tt$title[full.tt$title == 'Capt'] <- 'Officer' 
+full.tt$title[full.tt$title == 'Col'] <- 'Officer' 
+full.tt$title[full.tt$title == 'Major'] <- 'Officer'
+full.tt$title[full.tt$title == 'Dr'] <- 'Officer'
+full.tt$title[full.tt$title == 'Rev'] <- 'Officer'
+full.tt$title[full.tt$title == 'Don'] <- 'Officer'
+full.tt$title[full.tt$title == 'Sir'] <- 'Officer'
+full.tt$title[full.tt$title == 'the Countess'] <- 'Officer'
+full.tt$title[full.tt$title == 'Jonkheer'] <- 'Officer'
+```
+
+Survival rate for different titles
+```{r}
+ggplot(full.tt[1:891,], aes(x = title, fill = factor(Survived))) +
+  geom_bar() +
+  ggtitle("Title V/S Survival rate")+
+  xlab("Title") +
+  ylab("Total Count") +
+  labs(fill = "Survived")
+```
+* Mr have the least chance of Survival
+* Miss and Mrs have better survival rate than Officer
+
+Title and Survival rate in different classes
+```{r}
+ggplot(full.tt[1:891,], aes(x = title, fill = Survived)) +
+  geom_bar() +
+  facet_wrap(~Pclass) + 
+  ggtitle("3-way relationship of Title, Pclass, and Survival") +
+  xlab("Title") +
+  ylab("Total Count") +
+  labs(fill = "Survived")
+```
+* Master in 1st and 2nd class seems to have 100% survival rate
+* Mrs and Miss have nearly 90% survival rate in 1st and 2nd class
+
+#### Missing Values in Age
+```{r}
+tapply(full.tt$Age, full.tt$title, mean, na.rm = T)
+```
+Since title is mostly dependent upon age, we will be using title since age has 263 missing values.
+
+### Family
+
+Creating a variable called FamilySize using Sibsp and Parch
+```{r}
+full.tt$FamilySize <- full.tt$SibSp + full.tt$Parch + 1
+
+full.tt$FamilySized[full.tt$FamilySize == 1] <- 'Single'
+full.tt$FamilySized[full.tt$FamilySize < 5 & full.tt$FamilySize >= 2] <- 'Small'
+full.tt$FamilySized[full.tt$FamilySize >= 5] <- 'Big'
+
+full.tt$FamilySized <- as.factor(full.tt$FamilySized)
+```
+
+Visualizing survival rate for different family size
+```{r}
+ggplot(full.tt[1:891,], aes(x = FamilySized, fill = factor(Survived))) +
+  geom_bar() +
+  ggtitle("Family Size vs Survival Rate") +
+  xlab("Family Size") +
+  ylab("Total Count") +
+  labs(fill = "Survived")
+```
+* Big families have the worst survival rate
+
+Exploring this further by splitting plot further over titles
+```{r}
+ggplot(full.tt[1:891,], aes(x = FamilySized, fill = Survived)) +
+  geom_bar() +
+  facet_wrap( ~ title) + 
+  ggtitle("3D View of Family Size, Title and Survival rate") +
+  xlab("Family size") +
+  ylab("Total Count") +
+  ylim(0,300) +
+  labs(fill = "Survived")
+```
+* Survival rate for master in a big family is almost zero, even though the overall rate is reasonably high 
+* Survival rate for Single people is highest almost across titles. There is a chance that they are with friends
+
+Creating feature to indicate the number of passengers with the same ticket
+```{r}
+ticket.unique <- rep(0, nrow(full.tt))
+tickets <- unique(full.tt$Ticket)
+
+for(i in 1:length(tickets)){
+  party.indexes <- which(full.tt$Ticket == tickets[i])
+
+  for (k in 1:length(party.indexes)) {
+    # replacing 0 with number of tickets with same ticket number for each ticket
+    # this value will be same for similar ticket value
+    ticket.unique[party.indexes[k]] <- length(party.indexes)
+  }
+}
+
+full.tt$ticket.unique <- ticket.unique
+```
+
+Creating levels for the variable
+```{r}
+full.tt$ticket.size[full.tt$ticket.unique == 1] <- 'Single'
+full.tt$ticket.size[full.tt$ticket.unique < 5 & full.tt$ticket.unique >= 2] <- 'Small'
+full.tt$ticket.size[full.tt$ticket.unique >= 5] <- 'Big'
+```
+
+Survival rate for people for different ticket size
+```{r}
+ggplot(full.tt[1:891,], aes(x = ticket.size, fill = factor(Survived))) +
+  geom_bar() +
+  ggtitle("Ticket Size vs Survival")+
+  xlab("ticket.size") +
+  ylab("Total Count") +
+  labs(fill = "Survived")
+```
+
+Adding a third dimension: title
+```{r}
+ggplot(full.tt[1:891,], aes(x = ticket.size, fill = Survived)) +
+  geom_bar() +
+  facet_wrap( ~ title) + 
+  ggtitle("3 dimensional view of Ticket, Title and Survival rate") +
+  xlab("Ticket size") +
+  ylab("Total Count") +
+  ylim(0,300) +
+  labs(fill = "Survived")
+```
+Comparing ticket size and family size, we don't see much difference between two. 
+Maybe we can drop one of these out, that is contributing less.
+
+### Embarked
+
+Survival rate and where one gets on 
+```{r}
+ggplot(full.tt[1:891,], aes(x = Embarked, fill = factor(Survived))) +
+  geom_bar() +
+  ggtitle("Embarked vs Survival") +
+  xlab("Embarked") +
+  ylab("Total Count") +
+  labs(fill = "Survived")
+```
+
+Further dividing the graph into class
+```{r}
+ggplot(full.tt[1:891,], aes(x = Embarked, fill = Survived)) +
+  geom_bar() +
+  facet_wrap( ~ Pclass) + 
+  ggtitle("Pclass vs Embarked vs survival") +
+  xlab("Embarked") +
+  ylab("Total Count") +
+  labs(fill = "Survived")
+```
+
+### About Variables
+* Cabin has too many missing values, it doesn't seem appropriate to use that
+* We will use Title in place of Age
+* Fare correlates with pclass, therefore we are not gonna use that as well
+
+Converting these to factors
+```{r}
+full.tt$ticket.size <- as.factor(full.tt$ticket.size)
+full.tt$title <- as.factor(full.tt$title)
+```
+
+### Final list of variables
+1. Pclass
+2. title
+3. Sex
+4. Embarked
+5. FamilySized
+6. ticket.size
+
+Any redundant variable will be removed during the remaining analysis
+
+## Dividing the data into training set and validation set
+
+Filtering variables and observations and organizing data in proper format
+```{r}
+variable.list <- c("Pclass", "title","Sex","Embarked","FamilySized","ticket.size")
+
+dataset <- full.tt[1:891, variable.list]
+response <- as.factor(train.tt$Survived)
+dataset$Survived <- as.factor(train.tt$Survived)
+```
+
+Creating validation set
+```{r}
+set.seed(500)
+idx <- createDataPartition(dataset$Survived, times = 1, p = 0.8, list = F)
+train.val <- dataset[idx,]
+val <- dataset[-idx,]
+```
+
+Proportion of Survival rate in the original training data, current training and validation set
+
+Original training set
+```{r}
+round(prop.table(table(train.tt$Survived)*100), digits = 2)
+```
+
+New training set
+```{r}
+round(prop.table(table(train.val$Survived)*100), digits = 2)
+```
+
+Validation set
+```{r}
+round(prop.table(table(val$Survived)*100), digits = 2)
+```
+
+## Modeling and Evaluation with Cross Validation
+
+### Decision Tree
+Random Forest has far better predictive power than a single tree but a single tree is very easy to use and illustrate
+
+```{r}
+set.seed(1234)
+dt.model  <- rpart(Survived~., data=train.val, method = "class")
+rpart.plot(dt.model, extra = 3, fallen.leaves = T)
+```
+The single tree is using only Title, pclass, and ticket.size and have omiited the rest
+
+Making predictions on the training set
+```{r}
+pred.dt <- predict(dt.model, data=train.val, type = "class")
+confusionMatrix(pred.dt, train.val$Survived)
+```
+* Accuracy is 0.8375, which is not too bad given we have used only a single tree with just three features
+* But there is a scope of overfitting, therefore we are gonna use 10 fold cross validation to determine complexity parameter 
+```{r}
+set.seed(1234)
+cv.10 <- createMultiFolds(train.val$Survived, k = 10, times = 10)
+
+# Resampling technique
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10, 
+                     repeats = 10, 
+                     index = cv.10)
+
+# Training the model
+model.cdt <- train(x = train.val[,-7], y = train.val[,7], 
+                   method = "rpart", 
+                   tuneLength = 30,
+                   trControl = ctrl)
+```
+Accuracy is 0.81 which is less than 0.83, therefore we had overfitted earlier
+
+```{r}
+rpart.plot(model.cdt$finalModel, extra = 3, fallen.leaves = T)
+```
+
+Acuuracy on the validation set
+```{r}
+pred.cdt <- predict(model.cdt$finalModel, newdata = val, type = "class")
+confusionMatrix(pred.cdt, val$Survived)
+```
+Accuracy is 0.81
+
+## Random Forest
+
+```{r}
+set.seed(1234)
+(model.rf <- randomForest(x = train.val[,-7], y=train.val[,7], 
+                     importance = TRUE, ntree = 1000))
+```
+
+Variable importance plot
+```{r}
+varImpPlot(model.rf)
+```
+
+* Random Forest's accuracy rate is .8291 which is 1% better than that of decison tree.
+
+removing Embarked and Family Size and creating model again
+```{r}
+train.val1 <- train.val[,-4:-5]
+val1 <- val[,-4:-5]
+
+set.seed(1234)
+(model.rf2 <- randomForest(x = train.val1[,-5], y = train.val1[,5], 
+                     importance = TRUE, ntree = 1000))
+```
+
+Checking Variable Importance
+```{r}
+varImpPlot(model.rf2)
+```
+Accuracy is 84.03%
+
+Random Forest with Repeated Cross Validation
+```{r}
+set.seed(2348)
+rcv10 <- createMultiFolds(train.val1[,5], 
+                           k = 10, 
+                           times = 10)
+
+ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 10,
+                      index = rcv10)
+
+set.seed(1234)
+(model.rf3 <- train(x = train.val1[,-5], y = train.val1[,5], 
+                   method = "rf", tuneLength = 3,
+                   ntree = 1000, 
+                   trControl = ctrl))
+```
+Accurcay rate of .8393
+
+Prediction on the validation dataset
+```{r}
+pred.rf <- predict(model.rf3, newdata = val1)
+
+confusionMatrix(pred.rf, val1$Survived)
+```
+accuracy rate is 0.8192, which is lower than what we expected
+
+## Linear Support Vector Classifier
+
+Tuning the cost parameter
+```{r}
+set.seed(1274)
+(linear.tune <- tune.svm(Survived~.,data=train.val1,
+                        kernel = "linear", 
+                        cost=c(0.01,0.1,0.2,0.5,0.7,1,2,3,5,10,15,20,50,100)))
+```
+Best perforamnce is when cost is 3 and accuracy rate is 82.7
+
+Best Linear model
+```{r}
+svm.linear <- linear.tune$best.model
+
+# Predict Survival rate using validation data
+
+pred.svm <- predict(svm.linear, newdata = val1, type="class")
+confusionMatrix(pred.svm, val1$Survived)
+```
+Accuracy is 0.8136
+
+## Radial Support Vector Machine
+```{r}
+set.seed(1274)
+poly.tune <- tune.svm(Survived~., data = val1,
+                      kernel = "radial",
+                      gamma = seq(0.1,5))
+summary(poly.tune)
+```
+
+```{r}
+model.rsvm <- poly.tune$best.model
+
+# Prediction on validation data
+pred.rsvm <- predict(model.rsvm, newdata = val1)
+
+confusionMatrix(pred.rsvm, val1$Survived)
+```
+Accuracy is 0.81
+
+## Logistic Regression
+
+Checking how the variables are coded
+
+Survival rate
+```{r}
+contrasts(train.val1$Survived)
+```
+Pclass
+```{r}
+contrasts(train.val1$Pclass)
+```
+
+Building a logistic regression model
+```{r}
+model.logistic <- glm(Survived ~ ., 
+                      family = binomial(link=logit),
+                      data = train.val1)
+summary(model.logistic)
+```
+
+checking the confidence interval
+```{r}
+confint(model.logistic)
+```
+
+Making predictions on training data
+```{r}
+probpred.log <- predict(model.logistic, data=train.val1, 
+                       type =  "response")
+table(train.val1$Survived, probpred.log > 0.5)
+```
+
+```{r}
+(395+204)/(395+204+70+45)
+```
+83% Accuracy with training dataset
+
+Predictions on test dataset
+```{r}
+valprobpred.log <- predict(model.logistic, 
+                           newdata = val1,
+                           type =  "response")
+table(val1$Survived,valprobpred.log > 0.5)
+```
+
+```{r}
+(97+47)/(97+12+21+47)
+```
+81.3% accuracy on validation set
